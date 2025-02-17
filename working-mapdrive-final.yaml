@@ -1,0 +1,129 @@
+name: new map storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      Environment:
+        description: 'Select the environment'
+        required: true
+        default: 'Dev'
+        type: choice
+        options:
+          - Prod
+          - Dev
+      Operation:
+        description: 'Select the operation'
+        required: true
+        default: 'drivemap'
+        type: choice
+        options:
+          - drivemap
+
+jobs:
+  run-powershell-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Checkout script repository
+        uses: actions/checkout@v2
+        with:
+          repository: vivekcorp/vivek-testing-script_common
+          ref: main
+          token: ${{ secrets.MY_GITHUB_PAT }}
+          path: CognosGoldenImagesModule
+
+      - name: Install Az PowerShell Module
+        run: |
+          pwsh -Command 'Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser'
+          pwsh -Command 'Import-Module Az'
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.PROD_ARM_CLIENT_ID }}","tenantId":"${{ secrets.PROD_ARM_TENANT_ID }}","clientSecret":"${{ secrets.PROD_ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.PROD_ARM_SUBSCRIPTION_ID }}"}'
+
+      - name: Print Environment Variables
+        run: printenv
+
+      - name: Debug - List Files and Folders
+        run: ls -R $GITHUB_WORKSPACE
+
+      - name: Debug - Verify Script Path
+        run: |
+          SCRIPT_PATH="$GITHUB_WORKSPACE/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/mapnetworkdrive.ps1"
+          echo "Checking if script exists at: $SCRIPT_PATH"
+          if [ -f "$SCRIPT_PATH" ]; then
+              echo "Script found!"
+          else
+              echo "ERROR: Script NOT found!"
+              exit 1
+          fi
+        shell: bash
+
+      - name: Set execute permission for scripts
+        run: chmod +x "$GITHUB_WORKSPACE/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/mapnetworkdrive.ps1"
+
+      - name: Retrieve StorageAccountKey from GitHub Secrets
+        run: echo "StorageAccountKey=${{ secrets.NAS_MAPDRIVE }}" >> $GITHUB_ENV
+
+      - name: Verify Parameter File Path
+        run: |
+          PARAM_FILE="$GITHUB_WORKSPACE/GoldenImage/${{ github.event.inputs.Environment }}_Parameterfile.json"
+          echo "Checking path: $PARAM_FILE"
+          if [ -f "$PARAM_FILE" ]; then
+              echo "Parameter file exists."
+              echo "ParameterPath=$PARAM_FILE" >> $GITHUB_ENV
+          else
+              echo "ERROR: Parameter file does not exist!"
+              exit 1
+          fi
+        shell: bash
+
+      - name: Run PowerShell Script
+        shell: pwsh
+        run: |
+          $env:StorageAccountKey = "${{ secrets.NAS_MAPDRIVE }}"
+          $Environment = "${{ github.event.inputs.Environment }}"
+          $Operation = "${{ github.event.inputs.Operation }}"
+          $ParameterPath = "${{ env.ParameterPath }}"
+          
+          Write-Host "Using parameter path: $ParameterPath"
+          $ResourceGroupName = (Get-Content -Path $ParameterPath | ConvertFrom-Json).ResourceGroupName
+          
+          if (-not $ResourceGroupName) {
+              Write-Host "ResourceGroupName not found in parameter file."
+              exit 1
+          }
+          
+          $ScriptPath = "$env:GITHUB_WORKSPACE/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/mapnetworkdrive.ps1"
+          Write-Host "Checking script path: $ScriptPath"
+          
+          if (-Not (Test-Path $ScriptPath)) {
+              Write-Host "ERROR: Script file not found at $ScriptPath"
+              exit 1
+          }
+
+          if ($Operation -eq "drivemap") {
+              $FileList = "Golden Images\\*"
+              
+              Connect-AzAccount -ServicePrincipal -TenantId '${{ secrets.PROD_ARM_TENANT_ID }}' -Credential (New-Object -TypeName 'System.Management.Automation.PSCredential' -ArgumentList '${{ secrets.PROD_ARM_CLIENT_ID }}', (ConvertTo-SecureString '${{ secrets.PROD_ARM_CLIENT_SECRET }}' -AsPlainText -Force))
+
+              if ($?) {
+                  Write-Host "Azure login successful."
+                  Get-AzVM -ResourceGroupName $ResourceGroupName | ForEach-Object {
+                      Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -Name $_.Name -CommandId 'RunPowerShellScript' -ScriptPath $ScriptPath -Parameter @{"StorageAccountKey" = $env:StorageAccountKey; "FileList" = $FileList}
+                  }
+              } else {
+                  Write-Host "Azure login failed."
+                  exit 1
+              }
+          } else {
+              Write-Host "Invalid operation selected."
+              exit 1
+          }
