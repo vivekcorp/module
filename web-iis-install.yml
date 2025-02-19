@@ -1,0 +1,71 @@
+#name: Iis-Webserver-Install
+on:
+  workflow_call:
+    inputs:
+      Environment:
+        required: true
+        type: string
+
+jobs:
+  Iis-Webserver-Install:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Checkout script repository
+        uses: actions/checkout@v2
+        with:
+          repository: vivekcorp/vivek-testing-script_common
+          ref: main
+          token: ${{ secrets.MY_GITHUB_PAT }}
+          path: CognosGoldenImagesModule
+
+      - name: Install Az PowerShell Module
+        run: |
+          pwsh -Command 'Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser'
+          pwsh -Command 'Import-Module Az'
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.PROD_ARM_CLIENT_ID }}","tenantId":"${{ secrets.PROD_ARM_TENANT_ID }}","clientSecret":"${{ secrets.PROD_ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.PROD_ARM_SUBSCRIPTION_ID }}"}'
+
+      - name: Print Environment Variables
+        run: printenv
+
+      - name: Debug - Check Files and Folders
+        run: |
+          echo "Listing all files in workspace..."
+          ls -R $GITHUB_WORKSPACE
+
+      - name: Debug - List Important Directories
+        run: |
+          echo "Checking Script folder..."
+          ls -al $GITHUB_WORKSPACE/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell || echo "Script folder not found!"
+
+      - name: Debug - Print Full Path to Script
+        run: |
+          echo "Full path to the script:"
+          echo "${GITHUB_WORKSPACE}/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/installwebserver.ps1"
+
+      - name: Set execute permission for scripts
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/installwebserver.ps1"
+
+      - name: Run PowerShell Script
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.PROD_ARM_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.PROD_ARM_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.PROD_ARM_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.PROD_ARM_SUBSCRIPTION_ID }}
+        run: |
+          pwsh -File "${GITHUB_WORKSPACE}/CognosGoldenImagesModule/CognosGoldenImagesModule/powershell/installwebserver.ps1" -Environment ${{ inputs.Environment }} -ConfigFilePath "${GITHUB_WORKSPACE}/GoldenImage/Prod_Parameterfile.json"
+
+      - name: Error Handling
+        if: failure()
+        run: echo "An error occurred during the workflow execution"
