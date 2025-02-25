@@ -1,0 +1,109 @@
+name: Terraform CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Select Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - stage
+          - prod
+
+jobs:
+  terraform-plan-apply:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      TF_VAR_environment: ${{ github.event.inputs.environment }}
+      TF_VAR_file_path: ''
+
+    steps:
+      # Checkout Repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Set TF_VAR_file_path Based on Environment
+      - name: Set TF_VAR_file_path Based on Environment
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            echo "TF_VAR_file_path=../environment/tfvars/prod.tfvars" >> $GITHUB_ENV
+          elif [[ "${{ github.event.inputs.environment }}" == "stage" ]]; then
+            echo "TF_VAR_file_path=../environment/tfvars/stage.tfvars" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_file_path=../environment/tfvars/dev.tfvars" >> $GITHUB_ENV
+          fi
+
+      # Set Azure Credentials Based on Environment
+      - name: Set Azure Credentials Based on Environment
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            echo "ARM_CLIENT_ID=${{ secrets.PROD_ARM_CLIENT_ID }}" >> $GITHUB_ENV
+            echo "ARM_CLIENT_SECRET=${{ secrets.PROD_ARM_CLIENT_SECRET }}" >> $GITHUB_ENV
+            echo "ARM_SUBSCRIPTION_ID=${{ secrets.PROD_ARM_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+            echo "ARM_TENANT_ID=${{ secrets.PROD_ARM_TENANT_ID }}" >> $GITHUB_ENV
+          elif [[ "${{ github.event.inputs.environment }}" == "stage" ]]; then
+            echo "ARM_CLIENT_ID=${{ secrets.STAGE_ARM_CLIENT_ID }}" >> $GITHUB_ENV
+            echo "ARM_CLIENT_SECRET=${{ secrets.STAGE_ARM_CLIENT_SECRET }}" >> $GITHUB_ENV
+            echo "ARM_SUBSCRIPTION_ID=${{ secrets.STAGE_ARM_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+            echo "ARM_TENANT_ID=${{ secrets.STAGE_ARM_TENANT_ID }}" >> $GITHUB_ENV
+          else
+            echo "ARM_CLIENT_ID=${{ secrets.DEV_ARM_CLIENT_ID }}" >> $GITHUB_ENV
+            echo "ARM_CLIENT_SECRET=${{ secrets.DEV_ARM_CLIENT_SECRET }}" >> $GITHUB_ENV
+            echo "ARM_SUBSCRIPTION_ID=${{ secrets.DEV_ARM_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+            echo "ARM_TENANT_ID=${{ secrets.DEV_ARM_TENANT_ID }}" >> $GITHUB_ENV
+          fi
+
+      # Install Terraform
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      # Terraform Init
+      - name: Terraform Init
+        run: |
+          terraform init -reconfigure \
+            -backend-config="resource_group_name=ifra-tfstate" \
+            -backend-config="storage_account_name=infrastoragetfstate" \
+            -backend-config="container_name=infra-tfstate" \
+            -backend-config="key=${{ github.event.inputs.environment }}.tfstate"
+        working-directory: Infra
+
+      # Terraform Validate
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: Infra
+
+      # Ensure plandir Directory Exists Before Terraform Plan
+      - name: Ensure plandir Directory Exists
+        run: |
+          echo "Ensuring plandir directory exists"
+          mkdir -p Infra/plandir
+        working-directory: Infra
+
+      # Terraform Plan
+      - name: Terraform Plan
+        run: |
+          terraform plan -var-file="${{ env.TF_VAR_file_path }}" -out=Infra/plandir/plan_output.tfplan
+          echo "Terraform plan output saved as Infra/plandir/plan_output.tfplan"
+        working-directory: Infra
+
+      # Upload Terraform Plan Artifact
+      - name: Upload Terraform Plan Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-plan
+          path: Infra/plandir/plan_output.tfplan
+
+      # Apply Terraform Plan
+      - name: Apply Terraform Plan
+        run: |
+          terraform apply Infra/plandir/plan_output.tfplan
+        working-directory: Infra
