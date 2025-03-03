@@ -1,6 +1,14 @@
+param (
+    [string]$certPassword
+)
+
+if (-not $certPassword) {
+    Write-Error "The certificate password cannot be empty."
+    exit 1
+}
+
 # Certificate details
-$certPath = "C:\Users\Vivek\Documents\vivektripathi.com.pfx"  # Ensure correct file name and path
-$certPassword = "12345"
+$certPath = "C:\Cognos\vivektripathi.com.pfx"  # Ensure correct file name and path
 
 # Convert password to secure string
 $securePassword = ConvertTo-SecureString -String $certPassword -AsPlainText -Force
@@ -23,7 +31,17 @@ if (Test-Path -Path $certPath) {
             # Get the SSL binding
             $binding = Get-WebBinding -Name $siteName -Protocol "https"
 
-            if ($binding -ne $null) {
+            if ($binding -eq $null) {
+                # Create a new SSL binding if it doesn't exist
+                New-WebBinding -Name $siteName -Protocol "https" -Port 443 -HostHeader "*"
+                Write-Host "Created new SSL binding for the site: $siteName"
+
+                # Assign the certificate to the binding
+                $binding = Get-WebBinding -Name $siteName -Protocol "https"
+                $binding.AddSslCertificate($cert.Thumbprint, "My")
+                Set-WebConfiguration -Filter "system.applicationHost/sites/site[@name='$siteName']/bindings/binding[@protocol='https']" -Value $binding
+                Write-Host "Assigned certificate to the new SSL binding."
+            } else {
                 # Get existing certificate details
                 $existingCertThumbprint = $binding.certificateHash
 
@@ -49,8 +67,6 @@ if (Test-Path -Path $certPath) {
                     Write-Error "Certificate not found in the store: $certPath"
                 }
                 $store.Close()
-            } else {
-                Write-Error "SSL binding not found for the site: $siteName"
             }
         } else {
             Write-Error "Site not found: $siteName"
