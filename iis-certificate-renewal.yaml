@@ -14,7 +14,7 @@ on:
 
 jobs:
   install-iis:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout workflow repository
@@ -31,43 +31,34 @@ jobs:
       - name: Read JSON Parameters
         id: read-json
         run: |
-          $jsonContent = Get-Content -Path "${{ github.workspace }}/GoldenImage/${{ github.event.inputs.Environment }}_Parameterfile.json" | ConvertFrom-Json
-          echo "RESOURCE_GROUP_NAME=$($jsonContent.ResourceGroupName)" >> $env:GITHUB_ENV
-          echo "KEY_VAULT_NAME=$($jsonContent.KeyVaultName)" >> $env:GITHUB_ENV
-          echo "KEY_VAULT_SECRET_NAME=$($jsonContent.KeyVaultSecretName)" >> $env:GITHUB_ENV
-          echo "CERTIFICATE_PATH=$($jsonContent.CertificatePath)" >> $env:GITHUB_ENV
-
+          jsonContent=$(cat "${GITHUB_WORKSPACE}/GoldenImage/${{ github.event.inputs.Environment }}_Parameterfile.json")
+          echo "RESOURCE_GROUP_NAME=$(echo $jsonContent | jq -r .ResourceGroupName)" >> $GITHUB_ENV
+          echo "KEY_VAULT_NAME=$(echo $jsonContent | jq -r .KeyVaultName)" >> $GITHUB_ENV
+          echo "KEY_VAULT_SECRET_NAME=$(echo $jsonContent | jq -r .KeyVaultSecretName)" >> $GITHUB_ENV
+          echo "CERTIFICATE_PATH=$(echo $jsonContent | jq -r .CertificatePath)" >> $GITHUB_ENV
+          echo "EXCLUDE_VMS=$(echo $jsonContent | jq -r .excludeVMs | jq -c .)" >> $GITHUB_ENV
       - name: Fetch Certificate Password from Key Vault
+        id: fetch-secret
         run: |
-          $secret = az keyvault secret show --vault-name $env:KEY_VAULT_NAME --name $env:KEY_VAULT_SECRET_NAME --query value -o tsv
-          echo "CERTIFICATE_PASSWORD=$secret" >> $env:GITHUB_ENV
-
-      - name: List VMs in Resource Group and Set VM_NAME
+          secret=$(az keyvault secret show --vault-name $KEY_VAULT_NAME --name $KEY_VAULT_SECRET_NAME --query value -o tsv)
+          echo "::add-mask::$secret"
+          echo "CERTIFICATE_PASSWORD=$secret" >> $GITHUB_ENV
+      - name: List VMs in Resource Group and Set VM_NAMES
         id: list-vms
         run: |
-          $vms = az vm list --resource-group $env:RESOURCE_GROUP_NAME --query "[].name" -o tsv
-          echo "VM_NAME=$vms" >> $env:GITHUB_ENV
-
-      - name: Validate Environment Variables
+          vms=$(az vm list --resource-group $RESOURCE_GROUP_NAME --query "[].name" -o tsv)
+          include_vms=()
+          for vm in $vms; do
+            if [[ ! " ${EXCLUDE_VMS[*]} " =~ " ${vm} " ]]; then
+              include_vms+=($vm)
+            fi
+          done
+          echo "VM_NAMES=$(IFS=,; echo "${include_vms[*]}")" >> $GITHUB_ENV
+      - name: Trigger PowerShell Script on each VM
+        env:
+          CERTIFICATE_PASSWORD: ${{ env.CERTIFICATE_PASSWORD }}
         run: |
-          echo "RESOURCE_GROUP_NAME=$env:RESOURCE_GROUP_NAME"
-          echo "VM_NAME=$env:VM_NAME"
-          echo "KEY_VAULT_NAME=$env:KEY_VAULT_NAME"
-          echo "KEY_VAULT_SECRET_NAME=$env:KEY_VAULT_SECRET_NAME"
-          echo "CERTIFICATE_PASSWORD=$env:CERTIFICATE_PASSWORD"
-          echo "CERTIFICATE_PATH=$env:CERTIFICATE_PATH"
-
-      - name: Update Password in ssl.ps1 on VM
-        run: |
-          az vm run-command invoke --command-id RunPowerShellScript --name $env:VM_NAME --resource-group $env:RESOURCE_GROUP_NAME --scripts @"
-            param (
-                [string]`$certPath = 'C:\Cognos\ssl.ps1',
-                [string]`$certPassword = '${{ env.CERTIFICATE_PASSWORD }}'
-            )
-            (Get-Content -Path `$$certPath) -replace 'certPassword = \\"[^\"]*\\"', 'certPassword = \\"' + `$$certPassword + '\\"' | Set-Content -Path `$$certPath
-            Write-Output '✅ Password updated in ssl.ps1'
-          "@
-
-      - name: Trigger PowerShell Script on VM
-        run: |
-          az vm run-command invoke --command-id RunPowerShellScript --name $env:VM_NAME --resource-group $env:RESOURCE_GROUP_NAME --scripts 'C:\Cognos\ssl.ps1'
+          IFS=, read -r -a vm_array <<< "$VM_NAMES"
+          for vm in "${vm_array[@]}"; do
+            az vm run-command invoke --command-id RunPowerShellScript --name $vm --resource-group $RESOURCE_GROUP_NAME --scripts "C:\\Cognos\\ssl.ps1 -certPassword '${{ env.CERTIFICATE_PASSWORD }}'"
+          done
